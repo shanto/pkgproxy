@@ -1,0 +1,13 @@
+# generated cache: jsDelivr fallback index, github repo -> website map
+.cache/
+src/.cache/
+
+# secrets — SCOOP_AZURE_KEY, GITHUB_TOKEN live here
+.env
+src/.env
+
+*.log
+
+# built URI handler binary
+handler/pkgproxy.exe
+handler/*.exe

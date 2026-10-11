@@ -1,0 +1,31 @@
+services:
+  app:
+    # No build step — the app is zero-dependency plain node, so the stock image is enough.
+    image: node:24-alpine
+    init: true
+    restart: unless-stopped
+    working_dir: /app
+    command: node server.mjs
+    ports:
+      - ${PORTS:-8787:8787}
+    environment:
+      # 0.0.0.0 is required inside a container; the app defaults to 127.0.0.1
+      HOST: 0.0.0.0
+      PORT: "8787"
+      # azure is the default source; it needs SCOOP_AZURE_KEY, which the app
+      # reads from ./src/.env (bind-mounted below). Set it here to override.
+      SCOOP_SOURCE: azure
+      SCOOP_AZURE_KEY: ${SCOOP_AZURE_KEY:-}
+      SCOOP_ICONS: auto
+      # Keep the generated caches out of the bind-mounted source tree.
+      CACHE_DIR: /cache
+      # optional: 5000 req/h instead of 60 for github repo website lookups
+      # GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      # live source — edit ./src/server.mjs or ./src/ui.html and just restart the container
+      - ./src:/app
+      # persists the fallback index and the github repo map across restarts
+      - pkgproxy-cache:/cache
+
+volumes:
+  pkgproxy-cache:
