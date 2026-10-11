@@ -1,0 +1,23 @@
+{
+	"FixedFileInfo": {
+		"FileFlagsMask": "3f",
+		"FileFlags ": "00",
+		"FileOS": "040004",
+		"FileType": "01",
+		"FileSubType": "00"
+	},
+	"StringFileInfo": {
+		"CompanyName": "shanto",
+		"FileDescription": "URI handler that routes scoop:// and winget:// links to the right package manager",
+		"InternalName": "pkgproxy",
+		"LegalCopyright": "Copyright (c) Shaan. MIT licensed.",
+		"OriginalFilename": "pkgproxy.exe",
+		"ProductName": "pkgproxy"
+	},
+	"VarFileInfo": {
+		"Translation": {
+			"LangID": "0409",
+			"CharsetID": "04B0"
+		}
+	}
+}

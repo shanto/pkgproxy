@@ -1,0 +1,252 @@
+name: release
+
+# Builds the Windows handler, publishes it as a GitHub Release asset, then
+# pushes the new version + hash into the Scoop manifest in shanto/Scoop.
+#
+# Two invariants this file enforces, because breaking either one ships a
+# manifest that `scoop install` rejects:
+#
+#   1. The hash written to the bucket is read back off the asset the release
+#      actually serves -- never off the file this runner just built. A local
+#      build only describes the published zip if the upload really landed.
+#   2. The build is reproducible. Go's own output is content-derived (PE header
+#      timestamps are zeroed; -trimpath/-buildvcs=false drop path and VCS
+#      variance), but `zip` records the exe's mtime -- so the mtime is pinned to
+#      the commit time. Same commit -> same archive -> same hash, and a re-run
+#      is idempotent instead of quietly inventing a new hash.
+#
+# Triggers:
+#   - push a tag matching v*            -> releases that tag
+#   - manual run (workflow_dispatch)    -> releases the version you type in
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v (e.g. 0.1.0)."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# One release at a time. Two runs racing on the same tag would fight over the
+# asset and the manifest, which is how a stale asset ends up with a fresh hash.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP: pkgproxy
+  # Repo holding the bucket, and the manifest path inside it.
+  BUCKET_REPO: shanto/Scoop
+  MANIFEST_PATH: bucket/pkgproxy.json
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            VERSION="${INPUT_VERSION}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "${GITHUB_REF_NAME}" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            echo "::error::No version available. Pass the 'version' input or push a v* tag."
+            exit 1
+          fi
+          # A stray leading v here would yield tag vvX.Y.Z and asset names that
+          # no longer match the URL the manifest builds from the version.
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${VERSION}"
+
+      # SOURCE_DATE_EPOCH is the conventional reproducible-build pin, and it is
+      # reused below as the zip entry's mtime -- the field that actually makes
+      # two runs of this workflow agree on a sha256.
+      - name: Pin build timestamp
+        id: epoch
+        run: |
+          set -euo pipefail
+          EPOCH="$(git log -1 --format=%ct)"
+          echo "epoch=${EPOCH}" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=${EPOCH}" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=${EPOCH}"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: handler/go.mod
+          cache-dependency-path: handler/go.sum
+
+      - name: Generate Windows version resource
+        working-directory: handler
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          # No GOOS/GOARCH here on purpose: `go tool` builds the generator for
+          # the ambient GOOS, so GOOS=windows would produce a .exe it cannot
+          # exec on the runner. -64 pins the resource's machine type instead.
+        run: |
+          set -euo pipefail
+          # The PE version fields are four numbers and cannot carry a
+          # prerelease tag, so refuse a version that has one rather than
+          # shipping 0.1.0 for a v0.1.0-rc1.
+          case "${VERSION}" in
+            *[!0-9.]*|*..*|.*|*.) echo "::error::version '${VERSION}' is not numeric"; exit 1;;
+          esac
+          IFS=. read -r MAJOR MINOR PATCH EXTRA <<< "${VERSION}"
+          { [ -n "${PATCH:-}" ] && [ -z "${EXTRA:-}" ]; } \
+            || { echo "::error::version '${VERSION}' must be exactly x.y.z"; exit 1; }
+          # versioninfo.json (same directory) holds the static strings; only the
+          # numbers are per-release. Their string counterparts in
+          # StringFileInfo are filled in from them, so there is one source.
+          go tool goversioninfo -64 -o resource.syso \
+            -ver-major="${MAJOR}" -ver-minor="${MINOR}" -ver-patch="${PATCH}" -ver-build=0 \
+            -product-ver-major="${MAJOR}" -product-ver-minor="${MINOR}" -product-ver-patch="${PATCH}" -product-ver-build=0
+
+      - name: Build handler
+        working-directory: handler
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          mkdir -p ../dist
+          # -buildvcs=false: the embedded VCS stamp carries a per-run timestamp
+          # unless the checkout metadata is stable, and it buys us nothing here.
+          go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.version=${{ steps.v.outputs.version }}" \
+            -o "../dist/${APP}.exe" .
+
+      - name: Package and hash
+        id: pkg
+        env:
+          EPOCH: ${{ steps.epoch.outputs.epoch }}
+        run: |
+          set -euo pipefail
+          ASSET="${APP}_${{ steps.v.outputs.version }}_windows_amd64.zip"
+          # zip records the file mtime; pin it to the commit time and use -X so
+          # no uid/gid extra field is written.
+          touch -d "@${EPOCH}" "dist/${APP}.exe"
+          rm -f "dist/${ASSET}"
+          (cd dist && TZ=UTC zip -X -j "${ASSET}" "${APP}.exe")
+          HASH="$(sha256sum "dist/${ASSET}" | cut -d' ' -f1)"
+          echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "${ASSET} -> ${HASH}"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.v.outputs.tag }}
+          ASSET: ${{ steps.pkg.outputs.asset }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" "dist/${ASSET}" \
+              --title "${TAG}" \
+              --notes "pkgproxy ${TAG}"
+            exit 0
+          fi
+          # Replacing an asset is delete-then-upload, done explicitly: a bare
+          # `--clobber` against an existing release can leave the old asset in
+          # place while still exiting 0, which is exactly how the manifest ends
+          # up describing a zip nobody can download.
+          if gh release view "${TAG}" --json assets --jq '.assets[].name' | grep -Fxq "${ASSET}"; then
+            gh release delete-asset "${TAG}" "${ASSET}" --yes
+          fi
+          gh release upload "${TAG}" "dist/${ASSET}"
+          gh release view "${TAG}" --json assets --jq '.assets[].name' | grep -Fxq "${ASSET}" \
+            || { echo "::error::${ASSET} is not attached to ${TAG} after upload"; exit 1; }
+
+      # The only hash allowed to reach the bucket. `gh api` would be cheaper
+      # (the asset's .digest field) but that field is not populated for every
+      # asset, so this downloads what a user would get and hashes that.
+      - name: Verify published asset
+        id: published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.v.outputs.tag }}
+          ASSET: ${{ steps.pkg.outputs.asset }}
+          BUILT: ${{ steps.pkg.outputs.hash }}
+        run: |
+          set -euo pipefail
+          rm -rf pub && mkdir pub
+          gh release download "${TAG}" --pattern "${ASSET}" --dir pub --clobber
+          PUB="$(sha256sum "pub/${ASSET}" | cut -d' ' -f1)"
+          if [ "${PUB}" != "${BUILT}" ]; then
+            echo "::error::published asset hashes to ${PUB} but the build produced ${BUILT}; refusing to write the manifest"
+            exit 1
+          fi
+          echo "hash=${PUB}" >> "$GITHUB_OUTPUT"
+          echo "published ${ASSET} -> ${PUB}"
+
+      # The bucket lives in a different repo and is written with a different
+      # token, so it gets its own checkout. SCOOP_TOKEN needs contents:write on
+      # ${BUCKET_REPO}.
+      - name: Checkout bucket
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.BUCKET_REPO }}
+          token: ${{ secrets.SCOOP_TOKEN }}
+          path: bucket-repo
+
+      - name: Update manifest
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          HASH: ${{ steps.published.outputs.hash }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib
+
+          version = os.environ["VERSION"]
+          app = os.environ["APP"]
+          repo = os.environ["REPO"]
+          hash_ = os.environ["HASH"]
+          path = pathlib.Path("bucket-repo") / os.environ["MANIFEST_PATH"]
+
+          if not path.is_file():
+              raise SystemExit(f"manifest not found: {path}")
+          if not hash_:
+              raise SystemExit("refusing to write a manifest with an empty hash")
+
+          url = f"https://github.com/{repo}/releases/download/v{version}/{app}_{version}_windows_amd64.zip"
+
+          data = json.loads(path.read_text(encoding="utf-8"))
+          data["version"] = version
+          arch = data.setdefault("architecture", {}).setdefault("64bit", {})
+          arch["url"] = url
+          arch["hash"] = hash_
+
+          path.write_text(json.dumps(data, indent=4) + "\n", encoding="utf-8")
+          print(f"{path}: version={version} hash={hash_}")
+          PY
+
+      - name: Commit and push manifest
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          git -C bucket-repo config user.name "github-actions[bot]"
+          git -C bucket-repo config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C bucket-repo add "${MANIFEST_PATH}"
+          if git -C bucket-repo diff --cached --quiet; then
+            echo "Manifest already up to date, nothing to push."
+          else
+            git -C bucket-repo commit -m "${APP} ${VERSION}"
+            git -C bucket-repo push
+          fi

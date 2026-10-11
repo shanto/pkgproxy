@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pkgproxy — scoop + winget</title>
+<style>
+  :root{
+    --bg:#0d1014; --panel:#151920; --panel2:#1c212a; --border:#272d38;
+    --text:#e6e9ef; --muted:#98a2b3; --dim:#697586;
+    --scoop:#58a6ff; --scoop-bg:rgba(88,166,255,.13); --scoop-line:rgba(88,166,255,.3);
+    --winget:#3fb950; --winget-bg:rgba(63,185,80,.13); --winget-line:rgba(63,185,80,.3);
+    --bad:#f85149; --accent:#bc8cff;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex;flex-direction:column;min-height:100vh;
+  }
+  header{padding:22px 26px 0;flex:0 0 auto}
+  h1{margin:0 0 3px;font-size:19px;letter-spacing:-.01em;display:flex;align-items:center;gap:10px}
+  h1 .dot{width:8px;height:8px;border-radius:50%;background:var(--winget);box-shadow:0 0 8px var(--winget)}
+
+  /* ---------- attribute-driven pulse ----------
+     Dots carrying [data-pulse] beat; drop the attribute and it stops. Scoped to
+     .dot/.cdot on purpose — [data-pulse] is also set on containers (see the
+     setup-header rule below), and a bare [data-pulse] selector would beat the
+     whole panel. Only transform/opacity animate, so nothing reflows while it beats. */
+  @keyframes dotpulse{
+    0%,100%{transform:scale(1);opacity:1}
+    50%{transform:scale(1.5);opacity:.45}
+  }
+  .dot[data-pulse],.cdot[data-pulse]{animation:dotpulse 1.1s ease-in-out infinite}
+  @media (prefers-reduced-motion:reduce){
+    .dot[data-pulse],.cdot[data-pulse]{animation:none}
+  }
+  .tagline{color:var(--dim);font-size:12.5px;margin:0 0 16px}
+  .tagline code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--accent);font-size:11.5px}
+
+  a.gh{
+    margin-left:auto;display:flex;align-items:center;justify-content:center;
+    width:30px;height:30px;border-radius:7px;color:var(--dim);text-decoration:none;
+    border:1px solid transparent;transition:color .12s,border-color .12s,background .12s;
+  }
+  a.gh:hover{color:var(--text);background:var(--panel2);border-color:var(--border)}
+  a.gh svg{display:block}
+
+  .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  .searchwrap{position:relative;flex:1 1 340px;min-width:260px}
+  .searchwrap svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.45;pointer-events:none}
+  input[type=search]{
+    width:100%;background:var(--panel);border:1px solid var(--border);border-radius:8px;
+    color:var(--text);font:15px/1 ui-sans-serif,sans-serif;padding:12px 14px 12px 38px;outline:none;
+  }
+  input[type=search]:focus{border-color:var(--scoop);box-shadow:0 0 0 3px rgba(88,166,255,.12)}
+  input[type=search]::placeholder{color:var(--dim)}
+
+  .seg{display:flex;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .seg button{background:none;border:0;color:var(--muted);font:600 12.5px ui-sans-serif,sans-serif;padding:11px 15px;cursor:pointer}
+  .seg button+button{border-left:1px solid var(--border)}
+  .seg button:hover{color:var(--text);background:var(--panel2)}
+  .seg button.on{background:var(--panel2);color:var(--text)}
+  .seg button.on[data-src=scoop]{color:var(--scoop)}
+  .seg button.on[data-src=winget]{color:var(--winget)}
+
+  .meta{display:flex;gap:14px;align-items:center;color:var(--dim);font-size:12px;margin-bottom:14px;flex-wrap:wrap}
+  .meta .mode{font-family:ui-monospace,Consolas,monospace}
+  .meta .mode b{color:var(--muted);font-weight:600}
+  .meta .err{color:var(--bad)}
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--border);border-top-color:var(--scoop);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* ---------- 2x1 responsive grid ---------- */
+  main{flex:1 1 auto;padding:0 26px 40px;overflow-y:auto}
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:18px;
+    align-items:start;
+  }
+  .grid.one{grid-template-columns:minmax(0,1fr)}
+  @media (max-width:960px){
+    .grid{grid-template-columns:minmax(0,1fr)}
+  }
+  .col{min-width:0}
+  .colhead{
+    display:flex;align-items:center;gap:8px;margin:0 0 10px;padding-bottom:8px;
+    border-bottom:1px solid var(--border);
+  }
+  .colhead .cdot{width:7px;height:7px;border-radius:50%}
+  .colhead .cdot.scoop{background:var(--scoop)}
+  .colhead .cdot.winget{background:var(--winget)}
+  .colhead b{font:700 12px ui-sans-serif,sans-serif;letter-spacing:.08em;text-transform:uppercase}
+  .colhead.scoop b{color:var(--scoop)}
+  .colhead.winget b{color:var(--winget)}
+  .colhead .n{color:var(--dim);font:12px ui-monospace,monospace;margin-left:auto}
+  .colhead .err{color:var(--bad);font:11.5px ui-monospace,monospace;text-transform:none;letter-spacing:0}
+
+  .row{
+    display:flex;gap:12px;align-items:flex-start;background:var(--panel);
+    border:1px solid var(--border);border-radius:9px;padding:12px 13px;margin-bottom:8px;
+  }
+  .row:hover{border-color:#333c4a;background:#171c24}
+  .row.scoop:hover{border-color:var(--scoop-line)}
+  .row.winget:hover{border-color:var(--winget-line)}
+  .ico{
+    flex:0 0 34px;width:34px;height:34px;border-radius:7px;background:var(--panel2);
+    display:flex;align-items:center;justify-content:center;overflow:hidden;
+    font:700 12px ui-monospace,monospace;color:var(--muted);
+  }
+  .ico img{width:22px;height:22px;object-fit:contain}
+  .body{flex:1 1 auto;min-width:0}
+  .title{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:2px}
+  .title .name{font-weight:650;font-size:14px}
+  .title .ver{color:var(--dim);font:11.5px ui-monospace,monospace}
+  .badge.community{
+    color:var(--accent);background:rgba(188,140,255,.12);border:1px solid rgba(188,140,255,.32);
+    font:700 9.5px ui-sans-serif,sans-serif;letter-spacing:.05em;text-transform:uppercase;
+    padding:1.5px 6px;border-radius:4px;align-self:center;
+  }
+  .sub{color:var(--dim);font-size:11.5px;font-family:ui-monospace,Consolas,monospace;margin-bottom:4px;word-break:break-word}
+  /* bucket repo / project home links — dotted underline so they read as links
+     without adding any visual weight to the row */
+  .sub a.xlink{color:var(--dim);text-decoration:none;border-bottom:1px dotted rgba(105,117,134,.5)}
+  .sub a.xlink:hover{color:var(--text);border-bottom-color:var(--scoop)}
+  .title a.ver{text-decoration:none;border-bottom:1px dotted var(--border)}
+  .title a.ver:hover{color:var(--scoop);border-bottom-color:var(--scoop-line)}
+  .desc{color:var(--muted);font-size:12.5px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .acts{flex:0 0 auto;display:flex;flex-direction:column;gap:6px}
+  a.install{
+    display:block;text-align:center;text-decoration:none;font:600 12px ui-sans-serif,sans-serif;
+    padding:6px 11px;border-radius:6px;white-space:nowrap;border:1px solid transparent;
+  }
+  a.install.scoop{color:var(--scoop);background:var(--scoop-bg);border-color:var(--scoop-line)}
+  a.install.scoop:hover{background:rgba(88,166,255,.22)}
+  a.install.winget{color:var(--winget);background:var(--winget-bg);border-color:var(--winget-line)}
+  a.install.winget:hover{background:rgba(63,185,80,.22)}
+  button.copy{
+    background:var(--panel2);border:1px solid var(--border);color:var(--muted);
+    font:11px ui-monospace,monospace;padding:4px 9px;border-radius:6px;cursor:pointer;white-space:nowrap;
+  }
+  button.copy:hover{color:var(--text);border-color:#3a4454}
+
+  .none{color:var(--dim);font-size:12.5px;padding:14px 2px}
+  .empty{color:var(--dim);text-align:center;padding:50px 20px;font-size:13.5px;grid-column:1/-1}
+  .hint{color:var(--dim);font-size:12px;margin-top:22px;line-height:1.7;max-width:620px;margin-left:auto;margin-right:auto;text-align:left}
+  .hint code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--accent);font-size:11.5px}
+
+  /* ---------- folded setup instructions ---------- */
+  .setup{
+    flex:0 0 auto;margin:0 26px 16px;border:1px solid var(--border);
+    border-radius:9px;background:var(--panel);overflow:hidden;
+  }
+  .setup>summary{
+    display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none;
+    padding:11px 14px;font:600 12.5px ui-sans-serif,sans-serif;color:var(--muted);
+  }
+  .setup>summary::-webkit-details-marker{display:none}
+  .setup>summary:hover{background:var(--panel2);color:var(--text)}
+  .setup>summary::before{
+    content:"\25B8";color:var(--scoop);font-size:11px;line-height:1;
+    transition:transform .15s ease;
+  }
+  .setup[open]>summary::before{transform:rotate(90deg)}
+
+  @keyframes setupheadpulse{
+    0%,100%{background:transparent;color:var(--muted)}
+    50%{background:var(--scoop-bg);color:var(--text)}
+  }
+  .setup[data-pulse]>summary{animation:setupheadpulse .9s ease-in-out infinite}
+  .setup>summary code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--accent);font-size:11.5px}
+
+  .setup-body{padding:4px 16px 15px;border-top:1px solid var(--border);font-size:12.5px;color:var(--muted)}
+  .setup-body p{margin:11px 0 0;line-height:1.65}
+  .setup-body p b{color:var(--text)}
+  .step{margin-top:13px}
+  .step .sh{margin-bottom:6px;color:var(--text);font-weight:600}
+  .step .sh span{color:var(--dim);font-weight:400}
+  .step pre{
+    margin:0;padding:9px 12px;background:#0a0d11;border:1px solid var(--border);
+    border-radius:7px;overflow-x:auto;
+  }
+  .step pre code{
+    font:11.5px/1.65 ui-monospace,Consolas,monospace;color:var(--text);
+    background:none;padding:0;white-space:pre;
+  }
+  .setup-foot{
+    margin-top:14px;padding-top:11px;border-top:1px dashed var(--border);
+    color:var(--dim);font-size:12px;line-height:1.65;
+  }
+  .setup-foot code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--accent);font-size:11.5px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot" id="statusdot"></span>pkgproxy<a class="gh" href="https://github.com/shanto/pkgproxy" target="_blank" rel="noopener" title="Source on GitHub — shanto/pkgproxy" aria-label="Source on GitHub"><svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a></h1>
+  <p class="tagline">
+    One search across <b>scoop</b> and <b>winget</b>, side by side. Results emit
+    <code>scoop://install/&lt;app&gt;</code> and <code>winget://install/&lt;id&gt;</code> hyperlinks.
+  </p>
+
+  <div class="controls">
+    <div class="searchwrap">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+        <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>
+      </svg>
+      <input id="q" type="search" placeholder="Search packages — e.g. git, firefox, 7zip, ripgrep" autocomplete="off" autofocus>
+    </div>
+    <div class="seg" id="seg">
+      <button data-src="all" class="on">Both</button>
+      <button data-src="scoop">scoop</button>
+      <button data-src="winget">winget</button>
+    </div>
+  </div>
+
+  <div class="meta">
+    <span id="progress"></span>
+    <span class="mode" id="mode"></span>
+  </div>
+</header>
+
+<details class="setup">
+  <summary>First time? Install scoop and wire up the <code>scoop://</code> and <code>winget://</code> handlers</summary>
+  <div class="setup-body">
+    <p>
+      pkgproxy ships as a scoop package, and installing it also drops the URI handler these
+      links need. Run the following in <b>PowerShell</b>.
+    </p>
+
+    <div class="step">
+      <div class="sh">1 · Install scoop <span>— skip if you already have it</span></div>
+      <pre><code>Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+irm get.scoop.sh | iex</code></pre>
+    </div>
+
+    <div class="step">
+      <div class="sh">2 · Add the bucket and install pkgproxy</div>
+      <pre><code>scoop bucket add shanto https://github.com/shanto/Scoop
+scoop install shanto/pkgproxy</code></pre>
+    </div>
+
+    <p class="setup-foot">
+      That's it — installing pkgproxy registers both URL schemes for the current user, so every
+      <code>scoop://install/…</code> and <code>winget://install/…</code> link on this page now
+      opens a terminal and runs the install.
+    </p>
+  </div>
+</details>
+
+<main>
+  <div class="grid" id="grid"></div>
+</main>
+
+<script>
+const $q = document.getElementById('q');
+const $grid = document.getElementById('grid');
+const $progress = document.getElementById('progress');
+const $mode = document.getElementById('mode');
+const $dot = document.getElementById('statusdot');
+
+/**
+ * Drive the dot beat from any event. `pulse($dot)` starts it, `pulse($dot, false)`
+ * stops it. The remove → reflow → set dance restarts the keyframes, so an event
+ * that fires mid-beat still gets a visible response instead of being swallowed.
+ * Works on any element, not just the header dot.
+ */
+function pulse(el, on = true) {
+  if (!el) return;
+  el.removeAttribute('data-pulse');
+  if (!on) return;
+  void el.offsetWidth;            // flush styles so the animation restarts
+  el.setAttribute('data-pulse', '');
+}
+
+let source = 'all';
+let timer = null;
+let seq = 0;
+
+// ---- health ---------------------------------------------------------------
+fetch('/api/health').then(r => r.json()).then(h => {
+  const s = h.scoop || {};
+  const azure = s.azure || {};
+  // azure is the intended source; jsdelivr only takes over when there is no key
+  // to query with, so a mismatch here is a misconfiguration worth flagging.
+  const degraded = s.configuredSource !== 'jsdelivr' && !azure.keyPresent;
+  const m = s.activeSource === 'azure'
+    ? 'azure'
+    : `jsdelivr fallback${degraded ? ' — SCOOP_AZURE_KEY not set' : ' (official buckets only)'}`;
+  $mode.innerHTML = `scoop: <b>${esc(m)}</b> · winget: <b>winstall</b>`;
+  $dot.style.background = degraded ? 'var(--bad)' : 'var(--winget)';
+}).catch(() => {
+  $mode.textContent = 'proxy unreachable';
+  $dot.style.background = 'var(--bad)';
+});
+
+// ---- source toggle --------------------------------------------------------
+document.getElementById('seg').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-src]');
+  if (!b) return;
+  source = b.dataset.src;
+  [...document.querySelectorAll('#seg button')].forEach(x => x.classList.toggle('on', x === b));
+  run();
+});
+
+// ---- search ---------------------------------------------------------------
+$q.addEventListener('input', () => {
+  clearTimeout(timer);
+  timer = setTimeout(run, 220);
+});
+
+async function run() {
+  const q = $q.value.trim();
+  const my = ++seq;
+
+  if (!q) {
+    $grid.className = 'grid';
+    $grid.innerHTML = emptyState();
+    $progress.textContent = '';
+    return;
+  }
+
+  $progress.innerHTML = '<span class="spin"></span> searching…';
+
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}&source=${source}&limit=30`);
+    const data = await r.json();
+    if (my !== seq) return;
+
+    const rows = data.rows || [];
+    const errs = data.errors || {};
+    const scoop = rows.filter(x => x.source === 'scoop');
+    const winget = rows.filter(x => x.source === 'winget');
+
+    const showScoop = source === 'all' || source === 'scoop';
+    const showWinget = source === 'all' || source === 'winget';
+    const cols = [showScoop, showWinget].filter(Boolean).length;
+
+    $grid.className = cols === 1 ? 'grid one' : 'grid';
+
+    let html = '';
+    if (showScoop) html += column('scoop', scoop, errs.scoop, q);
+    if (showWinget) html += column('winget', winget, errs.winget, q);
+
+    if (!rows.length && !Object.keys(errs).length) html = emptyState(q);
+
+    $grid.innerHTML = html;
+    $progress.textContent = '';
+    wireCopies();
+  } catch (e) {
+    if (my !== seq) return;
+    $progress.textContent = '';
+    $grid.className = 'grid';
+    $grid.innerHTML = `<div class="empty">Request failed: ${esc(e.message || e)}</div>`;
+  }
+}
+
+function column(src, rows, err, q) {
+  const head = `<div class="colhead ${src}">
+      <span class="cdot ${src}"></span><b>${src}</b>
+      <span class="n">${rows.length}${err ? '' : ''}</span>
+    </div>`;
+
+  let body;
+  if (err) {
+    body = `<div class="none">upstream error — ${esc(err)}</div>`;
+  } else if (!rows.length) {
+    body = `<div class="none">no ${src} matches for “${esc(q)}”</div>`;
+  } else {
+    body = rows.map(render).join('');
+  }
+  return `<section class="col">${head}${body}</section>`;
+}
+
+function emptyState(q) {
+  return `<div class="empty">
+    ${q ? `No matches for <b>${esc(q)}</b> in either source.` : 'Type to search both package managers.'}
+    <div class="hint">
+      Results link to <code>scoop://install/&lt;app&gt;</code> and <code>winget://install/&lt;id&gt;</code>.
+      Those schemes are <b>not registered by default</b> — wire them to a handler to make clicks install.
+      The copy button gives you the raw command as a fallback.
+    </div>
+  </div>`;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/**
+ * Wrap text in an external link, or return it as plain escaped text when there
+ * is nothing to point at. Every URL here already rides along in the API payload
+ * (bucketUrl / homepage / repoWebsite), so this costs no extra request.
+ */
+function ext(href, text, title) {
+  if (!href) return esc(text);
+  return `<a class="xlink" href="${esc(href)}" target="_blank" rel="noopener noreferrer"` +
+    ` title="${esc(title || href)}">${esc(text)}</a>`;
+}
+
+function render(r) {
+  const initials = (r.name || r.id || '?').replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '??';
+  // icon: winstall icon for winget, DuckDuckGo favicon proxy for scoop.
+  // DDG answers 404 with a placeholder image, so onerror alone is not enough —
+  // the placeholder simply renders, which is acceptable.
+  const icon = r.iconUrl
+    ? `<img src="${esc(r.iconUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+         onerror="this.parentNode.textContent='${initials}'">`
+    : initials;
+
+  const subParts = [];
+  if (r.publisher) subParts.push(esc(r.publisher));
+  // bucket name links to the bucket repo — community buckets only exist as a URL,
+  // so this is the only way to tell which repo a community package came from
+  if (r.bucket) {
+    subParts.push(ext(r.bucketUrl, r.bucket + (r.official ? '' : ' (community)'),
+      r.bucketUrl ? `Bucket repository — ${r.bucketUrl}` : ''));
+  }
+  if (!r.official && r.stars) subParts.push('★ ' + r.stars);
+  // show the resolved project site when we have one, rather than a bare github.com
+  let effDomain = r.domain;
+  let homeHref = r.homepage || '';
+  if (r.repoWebsite) {
+    try { effDomain = new URL(r.repoWebsite).hostname.replace(/^www\./, ''); homeHref = r.repoWebsite; } catch { /* keep */ }
+  }
+  if (effDomain) subParts.push(ext(homeHref, effDomain, 'Project home — ' + homeHref));
+  if (r.license) subParts.push(esc(r.license));
+  const sub = subParts.join(' · ') || esc(r.id);
+
+  // version doubles as the link to the manifest, the way scoop.sh does it:
+  // both sources point `detailUrl` at the manifest itself
+  const ver = !r.version ? ''
+    : r.detailUrl
+      ? `<a class="ver" href="${esc(r.detailUrl)}" target="_blank" rel="noopener noreferrer"` +
+        ` title="Manifest — ${esc(r.detailUrl)}">${esc(r.version)}</a>`
+      : `<span class="ver">${esc(r.version)}</span>`;
+
+  return `<div class="row ${r.source}">
+    <div class="ico">${icon}</div>
+    <div class="body">
+      <div class="title">
+        <span class="name">${esc(r.name || r.id)}</span>
+        ${ver}
+        ${r.official === false ? '<span class="badge community">community</span>' : ''}
+      </div>
+      <div class="sub">${sub}</div>
+      ${r.description ? `<div class="desc">${esc(r.description)}</div>` : ''}
+    </div>
+    <div class="acts">
+      <a class="install ${r.source}" href="${esc(r.uri)}" title="${esc(r.uri)}">install</a>
+      <button class="copy" data-cmd="${esc(r.installCommand)}">copy</button>
+    </div>
+  </div>`;
+}
+
+function wireCopies() {
+  $grid.querySelectorAll('button.copy').forEach(b => {
+    b.addEventListener('click', async () => {
+      const cmd = b.dataset.cmd;
+      try {
+        await navigator.clipboard.writeText(cmd);
+        const old = b.textContent;
+        b.textContent = 'copied';
+        setTimeout(() => { b.textContent = old; }, 1100);
+      } catch {
+        b.textContent = cmd;
+      }
+    });
+  });
+}
+
+// deep-linkable searches: /?q=git&source=scoop
+(() => {
+  const p = new URLSearchParams(location.search);
+  const q = p.get('q');
+  const s = p.get('source');
+  if (s && ['all', 'scoop', 'winget'].includes(s)) {
+    source = s;
+    [...document.querySelectorAll('#seg button')].forEach(x => x.classList.toggle('on', x.dataset.src === s));
+  }
+  if (q) {
+    $q.value = q;
+    run();
+  }
+})();
+(() => {
+  const setup = document.querySelector('details.setup');
+  const onHover = e => {
+    const href = e.target?.href || ''
+    if(href.match(/^(scoop|winget):\/\//)) {
+      setup.toggleAttribute('data-pulse', e.type === 'mouseover');
+    }
+  }
+  document.addEventListener('mouseover', onHover);
+  document.addEventListener('mouseout', onHover);
+})()
+</script>
+</body>
+</html>

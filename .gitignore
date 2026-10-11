@@ -1,0 +1,17 @@
+# generated cache: jsDelivr fallback index, github repo -> website map
+.cache/
+src/.cache/
+
+# secrets — SCOOP_AZURE_KEY, GITHUB_TOKEN live here
+.env
+src/.env
+
+*.log
+
+# built URI handler binary
+handler/pkgproxy.exe
+handler/*.exe
+
+# generated Windows version resource (goversioninfo); exactly one .syso may sit
+# next to main.go -- a second one makes the link fail with "too many .rsrc sections"
+handler/*.syso
