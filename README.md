@@ -14,7 +14,9 @@ managers, and returns every result as a **`scoop://` or `winget://` hyperlink**.
 
 Zero dependencies. Node 22+ (uses global `fetch` and `process.loadEnvFile`).
 
----
+
+https://github.com/user-attachments/assets/c51099cf-0f17-40a9-93b7-478fc490f68a
+
 
 ## Run
 
